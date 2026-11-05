@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>triage-agent · 工单分诊</title>
+<style>
+  :root {
+    --bg: #FAFAF7;
+    --card: #FFFFFF;
+    --border: #E2E0D8;
+    --text: #22201C;
+    --muted: #6B6862;
+    --green: #1D9E75;
+    --green-bg: #E1F5EE;
+    --amber: #BA7517;
+    --amber-bg: #FAEEDA;
+    --red: #A32D2D;
+    --red-bg: #FCEBEB;
+    --blue: #185FA5;
+    --blue-bg: #E6F1FB;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 20px 64px;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 14px; line-height: 1.65;
+  }
+  .wrap { max-width: 840px; margin: 0 auto; }
+  header { margin-bottom: 20px; }
+  h1 { font-size: 19px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px; margin-bottom: 16px;
+  }
+  textarea {
+    width: 100%; min-height: 140px; resize: vertical;
+    padding: 12px; border: 1px solid var(--border); border-radius: 8px;
+    font-family: inherit; font-size: 14px; line-height: 1.6;
+    color: var(--text); background: #FFF;
+  }
+  textarea:focus { outline: 2px solid var(--blue-bg); border-color: var(--blue); }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  button {
+    font-family: inherit; font-size: 14px; padding: 9px 18px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: #FFF; color: var(--text); cursor: pointer;
+  }
+  button:hover { background: #F5F4EF; }
+  button.primary { background: var(--text); color: #FFF; border-color: var(--text); }
+  button.primary:hover { background: #3A3733; }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+  /* 分类和决策是「这次结果的两个属性」，不是可点的筛选器。
+     所以不用胶囊背景（那看起来像按钮），改成一行带前缀的文本。 */
+  .meta { margin-bottom: 4px; font-size: 13px; }
+  .meta-k { color: var(--muted); margin-right: 5px; }
+  .meta-v { font-weight: 600; }
+  .meta-v.answer { color: var(--green); }
+  .meta-v.ask_more { color: var(--amber); }
+  .meta-v.escalate { color: var(--red); }
+  .meta-sep { color: var(--border); margin: 0 10px; }
+  .block-label {
+    font-size: 12px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; margin: 16px 0 6px;
+  }
+  /* 左边框颜色跟着决策走：转人工是红、反问是黄。全用绿色会让人误以为"成功了"。 */
+  .reply {
+    background: #FBFAF6; border-left: 3px solid var(--border);
+    padding: 12px 14px; border-radius: 0 8px 8px 0; white-space: pre-wrap;
+  }
+  .reply.answer { border-left-color: var(--green); }
+  .reply.ask_more { border-left-color: var(--amber); }
+  .reply.escalate { border-left-color: var(--red); }
+  .reason { color: var(--muted); font-size: 13px; white-space: pre-wrap; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--blue); font-size: 13px; }
+  .hit {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; margin-top: 8px; background: #FDFDFB;
+  }
+  .hit-head { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; }
+  .hit-id { color: var(--text); font-weight: 500; word-break: break-all; }
+  .hit-score { color: var(--muted); white-space: nowrap; }
+  .hit-text { color: var(--muted); font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
+  .error { color: var(--red); font-size: 13px; }
+  .empty { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>triage-agent</h1>
+    <div class="sub" id="stats">FastGPT 客服工单分诊 · 正在读取知识库…</div>
+  </header>
+
+  <div class="card">
+    <textarea id="input" placeholder="把用户反馈粘贴到这里，例如：&#10;我在工作台改了应用配置，但是聊天的时候没生效，还是旧的。"></textarea>
+    <div class="row">
+      <button class="primary" id="go">开始分诊</button>
+      <button id="random">随机来一条真实工单</button>
+      <span class="hint" id="hint">回车换行，Ctrl+Enter 提交</span>
+    </div>
+  </div>
+
+  <div class="card" id="result" style="display:none"></div>
+</div>
+
+<script>
+const input = document.getElementById('input');
+const result = document.getElementById('result');
+const goBtn = document.getElementById('go');
+const randomBtn = document.getElementById('random');
+const hint = document.getElementById('hint');
+
+const DECISION_TEXT = {
+  answer: '直接回答',
+  ask_more: '反问补充信息',
+  escalate: '转人工'
+};
+
+fetch('/stats').then(r => r.json()).then(s => {
+  document.getElementById('stats').textContent =
+    `FastGPT 客服工单分诊 · 知识库 ${s.knowledge_count} 条 · 测试工单 ${s.ticket_count} 条`;
+});
+
+randomBtn.onclick = async () => {
+  randomBtn.disabled = true;
+  const r = await fetch('/random_ticket');
+  const t = await r.json();
+  input.value = t.text;
+  hint.textContent = `来自工单 #${t.number}，原始标签：${(t.labels || []).join(', ') || '无'}`;
+  randomBtn.disabled = false;
+};
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) goBtn.click();
+});
+
+goBtn.onclick = async () => {
+  const text = input.value.trim();
+  if (text.length < 5) {
+    result.style.display = 'block';
+    result.innerHTML = '<div class="empty">工单太短了，至少写 5 个字。</div>';
+    return;
+  }
+
+  goBtn.disabled = true;
+  goBtn.textContent = '分诊中…';
+  result.style.display = 'block';
+  result.innerHTML = '<div class="empty">正在检索知识库并判断…</div>';
+
+  try {
+    const resp = await fetch('/triage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    render(await resp.json());
+  } catch (err) {
+    result.innerHTML = `<div class="error">请求失败：${err.message}</div>`;
+  } finally {
+    goBtn.disabled = false;
+    goBtn.textContent = '开始分诊';
+  }
+};
+
+function escapeHtml(s) {
+  return (s || '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+function render(data) {
+  const decision = data.decision || 'escalate';
+  const hits = data.hits || [];
+
+  let html = `<div class="meta">
+      <span class="meta-k">分类</span><span class="meta-v">${escapeHtml(data.category || '未分类')}</span>
+      <span class="meta-sep">·</span>
+      <span class="meta-k">决策</span><span class="meta-v ${decision}">${DECISION_TEXT[decision] || decision}</span>
+    </div>`;
+
+  if (data.reply) {
+    html += `<div class="block-label">给用户的回复</div>
+             <div class="reply ${decision}">${escapeHtml(data.reply)}</div>`;
+  }
+
+  html += `<div class="block-label">判断理由</div>
+           <div class="reason">${escapeHtml(data.reason || '（无）')}</div>`;
+
+  html += `<details><summary>检索到的 ${hits.length} 条知识（点开看依据）</summary>`;
+  if (hits.length === 0) {
+    html += '<div class="empty" style="margin-top:8px">知识库里没有检索到任何相关内容。</div>';
+  }
+  for (const hit of hits) {
+    html += `<div class="hit">
+        <div class="hit-head">
+          <span class="hit-id">${escapeHtml(hit.id)}</span>
+          <span class="hit-score">相似度 ${hit.score}</span>
+        </div>
+        <div class="hit-text">${escapeHtml((hit.text || '').slice(0, 320))}</div>
+      </div>`;
+  }
+  html += `</details>`;
+
+  if (data.usage) {
+    html += `<div class="hint" style="margin-top:12px">本次消耗 ${data.usage.prompt_tokens}
+             + ${data.usage.completion_tokens} token</div>`;
+  }
+
+  result.innerHTML = html;
+}
+</script>
+</body>
+</html>

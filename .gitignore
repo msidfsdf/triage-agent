@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+
+# ingest.py 生成的数据，可复现，不进仓库
+data/faq.json
+data/tickets.json
