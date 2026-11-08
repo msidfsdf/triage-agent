@@ -5,3 +5,8 @@ __pycache__/
 # ingest.py 生成的数据，可复现，不进仓库
 data/faq.json
 data/tickets.json
+
+# 评测运行产物，由脚本生成、可复现，不进仓库
+eval/results/
+eval/golden.json
+eval/labels.jsonl

@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 load_dotenv(BASE.parent / ".env")
 
 import triage
+from triage import clean_body
 
 TICKETS = BASE.parent / "data" / "tickets.json"
 SAMPLE = BASE / "sample.json"
@@ -41,7 +42,7 @@ def read_jsonl(path):
 
 
 def run_one(ticket):
-    text = ticket["title"] + "\n" + ticket["body"]
+    text = ticket["title"] + "\n" + clean_body(ticket["body"])
     start = time.time()
     try:
         result = triage.triage(text)

@@ -22,6 +22,8 @@ app = FastAPI(title="triage-agent", description="FastGPT 客服工单分诊")
 
 class TicketRequest(BaseModel):
     text: str = Field(..., min_length=5, description="工单原文")
+    # 不传就是单轮，和 v2 行为一致，方便 curl 直接试
+    thread_id: str | None = Field(None, description="会话 id，多轮时由前端生成并沿用")
 
 
 @app.get("/")
@@ -37,7 +39,7 @@ def run_triage(request: TicketRequest):
     系统判断不了，就交给人，而不是把报错甩给用户。
     """
     try:
-        return triage.triage(request.text)
+        return triage.triage(request.text, thread_id=request.thread_id)
     except Exception as error:
         return {
             "category": "其他",
@@ -50,16 +52,23 @@ def run_triage(request: TicketRequest):
 
 @app.get("/random_ticket")
 def random_ticket():
-    """随机给一条真实工单，方便快速试。优先挑正文长一些的，短工单看不出回答质量。"""
-    # 是从/data/tickets.json读取的工单
-    longer = [t for t in TICKETS if len(t["body"]) > 150]
-    ticket = random.choice(longer or TICKETS)
+    """随机给一条真实工单，方便快速试。
+
+    以前这里只从「正文超过 150 字」的工单里抽，理由是想挑描述完整的。
+    实测这个过滤是错的：能答的工单恰恰都是短工单（正文中位 20 出头，
+    很多只有标题和一句话），它们一条都进不了池子 —— 池子 27 条和能答的 11 条零重合，
+    于是页面上连点三十次也见不到一次「已解决」。
+    现在改成全量等概率抽。
+    """
+    ticket = random.choice(TICKETS)
     return {
         "number": ticket["number"],
         "title": ticket["title"],
         "body": ticket["body"],
         "labels": ticket["labels"],
-        "text": f"{ticket['title']}\n{ticket['body']}",
+        # 和评测走同一个清洗：不然页面上跑的是带 "我已确认…" 模板的原文，
+        # 评测跑的是清洗后的文本，两边结果对不上
+        "text": f"{ticket['title']}\n{triage.clean_body(ticket['body'])}",
     }
 
 

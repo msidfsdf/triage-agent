@@ -71,9 +71,16 @@ def clean_body(body):
 
 
 def show(ticket, index, total):
-    labels = ",".join(ticket["labels"]) or "-"
+    """只打编号、标题、正文。
+
+    不打 GitHub 标签 / 评论数 / state_reason：这三样等于把答案写在题面上。
+    样本里 26/30 带 bug 标签，看到就知道该选 e b，判定树第 1 步（看不看得出问题）
+    直接被跳过；评论数 0 诱导选「覆盖不足」，not_planned 诱导选「需求」。
+    而判定树这三样一个都用不上，所以它们只有污染，没有收益。
+    标完再单独看「人工判定 vs 维护者标签」的一致率，那时它才是数据。
+    """
     print(f"\n{'─' * 72}")
-    print(f"[{index}/{total}] #{ticket['number']}  [{labels}]  评论 {ticket['comments']}  {ticket['state_reason']}")
+    print(f"[{index}/{total}] #{ticket['number']}")
     print(f"{'─' * 72}")
     print(ticket["title"])
     body = clean_body(ticket["body"])

@@ -16,13 +16,16 @@ BRANCH = "main"
 API = "https://api.github.com"
 RAW = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/"
 
-# 整个 content 目录都要，只排除两类：
-# - openapi：二次开发的接口文档，客服工单里不会问
+# 整个 content 目录都要，只排除一类：
 # - upgrading：版本更新日志。实测它是检索质量的头号杀手——这种文档列了几十项改动，
 #   几乎能命中任何关键词（"配置""报错""应用"都有），靠一堆泛词刷到最高分，
 #   把真正的答案挤下去。日志不是答案，不该进知识库。
+#
+# openapi 曾经也被排除，理由是"客服工单不会问接口"。实测推翻了这条假设：
+# 30 条评测工单里有 4 条在问 API 用法（返回 json、取文件夹下集合列表、非流式输出），
+# 这些内容在库里一条都没有，等于永远无解。现在放回来。
 DOC_DIRS = ["document/content"]
-EXCLUDE_DIRS = ["document/content/openapi", "document/content/self-host/upgrading"]
+EXCLUDE_DIRS = ["document/content/self-host/upgrading"]
 
 DATA_DIR = pathlib.Path(__file__).parent / "data"
 

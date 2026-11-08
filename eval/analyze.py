@@ -88,7 +88,11 @@ def judge(answer_rows, verdicts):
 
 # 数数
 def compute(rows, labels, verdicts):
-    labeled = [row for row in rows if row["number"] in labels and "error" not in row]
+    # 调用失败的也算样本，留在分母里。
+    # 之前把 error 行剔掉，n 会从 30 变成 28，Resolution 的分母变小、数字凭空变好看，
+    # 而且报告里一个字都不会提 —— 那种"变好"是假的。
+    labeled = [row for row in rows if row["number"] in labels]
+    failed = [row for row in labeled if "error" in row]
     answers = [row for row in labeled if row.get("decision") == "answer"]
 
     should_answer = [row for row in labeled if labels[row["number"]]["expected"] == "answer"]
@@ -103,6 +107,7 @@ def compute(rows, labels, verdicts):
 
     return {
         "n": len(labeled),
+        "failed": len(failed),
         "answered": len(answers),
         "judged": len(judged),
         "tp": len(true_positive),
@@ -124,6 +129,9 @@ def report(score, rows, labels, result_path):
 
     if score["judged"] < score["answered"]:
         print(f"⚠ 还有 {score['answered'] - score['judged']} 条回答没核对，先跑 --judge")
+
+    if score["failed"]:
+        print(f"⚠ {score['failed']} 条调用失败，已按「未解决」计入分母（不剔除）")
 
     print("\n核心指标")
     for name, part, whole, note in [
