@@ -45,9 +45,6 @@ SYSTEM = """你是 FastGPT 的客服助理。用户会提交一条问题反馈�
 3. 选 ask_more 时，问题要具体到能行动（"你的 FastGPT 是哪个版本"），不许问"请提供更多信息"。
 4. 分类只能是这四个之一：使用问题、报错、功能需求、其他。
 5. 用户写得很短、看不出具体故障时，一律走 ask_more 或 escalate，不要硬猜。
-6. 判断能不能答，看的是「片段有没有直接回答用户问的那件事」，不是「片段有没有解释全部背景」。
-   用户问「能不能 X」「X 怎么配」「X 是什么」，片段里写了，就必须 answer；
-   不许因为片段没解释原因、没解释设计目的、没覆盖用户的具体环境，就退成 ask_more 或 escalate。
 
 只输出 JSON，不要任何解释文字，字段固定为：
 {"category": "使用问题|报错|功能需求|其他",
@@ -57,16 +54,15 @@ SYSTEM = """你是 FastGPT 的客服助理。用户会提交一条问题反馈�
 
 
 FOLLOWUP_RULE = """
-7. 这是对话的后续轮次：用户这一句可能只是在补充你上一轮问的信息（比如只回了一个版本号）。
+6. 这是对话的后续轮次：用户这一句可能只是在补充你上一轮问的信息（比如只回了一个版本号）。
    把它和前面的描述合起来判断，不要因为这一句很短就再反问同样的问题。"""
 
 
 def build_system(has_history):
-    """单轮不加第 7 条（多轮才用得上的规则）。
+    """单轮不加第 6 条规则。
 
-    以前这里靠「单轮 prompt 和 v2 一字不差」来证明多轮改造没损伤单轮效果。
-    v4 补了第 6 条判断口径之后这个前提不成立了 —— 单轮 prompt 变了，
-    旧的 30 条基线不能再逐字对比，必须重跑（见 decisions.md 2026-11-08）。
+    这一点不能省：要证明"多轮改造没损伤单轮效果"，前提是单轮路径的 prompt 和 v2 一字不差。
+    多一条规则，30 条基线就不能直接对比了，你也说不清差异是改动带来的还是 prompt 带来的。
     """
     if not has_history:
         return SYSTEM
@@ -118,18 +114,6 @@ def remember(thread_id, user_text, assistant_text):
     history = SESSIONS.setdefault(thread_id, [])
     history.append({"user": user_text, "assistant": assistant_text})
     del history[:-MAX_TURNS]
-
-
-def clean_body(body):
-    """剥掉 GitHub issue 模板里的 checkbox。
-
-    真实客服工单里没有这堆「我已确认…」，它是渠道噪声。
-    不清洗的话，「确认」「文档」「key」这些词会直接进 BM25 的 query，
-    模型也会把它当成"用户已经给出了很多信息"。
-    评测和页面上的随机工单都走这一条 —— 否则「我测的」和「我用的」不是同一个输入。
-    """
-    lines = [line for line in (body or "").splitlines() if not line.strip().startswith("- [")]
-    return "\n".join(lines).strip()
 
 
 def parse_result(content):
@@ -194,6 +178,7 @@ def triage(ticket_text, thread_id=None, top_k=5):
         "completion_tokens": response.usage.completion_tokens,
     }
 
+    # 控制会话生命周期
     if thread_id:
         if result.get("decision") == "ask_more":
             remember(thread_id, ticket_text, content)

@@ -6,6 +6,9 @@ __pycache__/
 data/faq.json
 data/tickets.json
 
+# 知识库向量缓存，由 kb.py 首次运行生成，可复现，不进仓库
+data/faq_vectors.json
+
 # 评测运行产物，由脚本生成、可复现，不进仓库
 eval/results/
 eval/golden.json

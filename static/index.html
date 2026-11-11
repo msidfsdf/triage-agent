@@ -282,7 +282,7 @@ function botHtml(data) {
     html += `<div class="hit">
         <div class="hit-head">
           <span class="hit-id">${escapeHtml(hit.id)}</span>
-          <span class="hit-score">相似度 ${hit.score}</span>
+          <span class="hit-score">相关度 ${hit.score}</span>
         </div>
         <div class="hit-text">${escapeHtml((hit.text || '').slice(0, 320))}</div>
       </div>`;
