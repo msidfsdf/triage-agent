@@ -45,7 +45,7 @@ python kb.py
 |---|---|
 | `ingest.py` | 抓 FastGPT 文档（切块）和已关闭 issue，写到 `data/` |
 | `kb.py` | 知识库检索：jieba 分词 + BM25 |
-| `triage.py` | 分诊：检索 → 调模型 → 结构化结果 |
+| `triage.py` | 分诊：LangGraph 状态图（模型判断 → 检索 → 再判断 → 收尾） |
 | `app.py` | FastAPI：`/triage`、`/random_ticket`、`/stats` |
 | `decisions.md` | 每一次返工和实验的记录，含失败的那次 |
 

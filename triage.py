@@ -1,22 +1,28 @@
-"""工单分诊：Agent 版（v5）。
+"""工单分诊：Agent 版（v6，LangGraph 状态图）。
 
-和 v4 的区别：检索从"代码写死的一步"变成"模型可以主动调用的工具"。
-模型自己决定：查不查、查什么、查几次，查完再判断"够不够答 / 转人工"。
+和 v5 的区别：v5 用 for 循环 + if/break 手写 ReAct 循环，控制流藏在代码里；
+v6 用 LangGraph 把「模型判断 → 要不要检索 → 检索 → 再判断」画成图上的节点和边，
+循环是图上的一条环，控制流一眼可见。
 
-为什么这么做：v4 的固定流水线有两个死板的地方——
-1. 不管用户问什么，都先检索一遍。寒暄（"你好"）也会被拿去检索，然后转人工。
-2. 只用原话检索一次。口语问句对不上文档术语时，一次查不到就转人工，没有第二次机会。
+为什么把 20 行循环搬成一张图（不是为了提指标，指标一个都不会变）：
+1. 状态机显式化：Agent 每一步读什么状态、往哪走，从注释变成图的结构。
+2. 好扩展：以后加「自动建单」「查订单」这类工具，就是往图里加节点+边，
+   不用再改手写循环的控制流。
+3. 天然支持中断/恢复/回溯，手写 while 循环里做 checkpoint 很难。
 
-改成 tool calling 后，这两个都交给模型自己决定，符合"得先看情况才知道该查什么"的 Agent 场景。
+LangGraph 只负责「编排」，调模型/检索/解析这些业务逻辑还是 v5 的函数。
+这就是编排框架的定位：不替代业务逻辑，只替代手写的「下一步往哪走」。
 
 核心约束不变：模型只能用检索到的片段回答，片段里没有就说不知道。
 """
 
 import json
 import os
+from typing import TypedDict
 
 import kb
 from dotenv import load_dotenv
+from langgraph.graph import StateGraph, START, END
 from openai import OpenAI
 
 load_dotenv()
@@ -195,79 +201,136 @@ def format_hits(hits):
     return "\n\n".join(lines)
 
 
-def triage(ticket_text, thread_id=None, top_k=5):
-    """处理一条工单（Agent 循环版）。
+# ── 状态：图上所有节点共享、传递的数据 ─────────────────────────────
+# LangGraph 的核心：一张图在「状态」上流转。每个节点读状态、改状态，
+# 边决定改完后往哪走。状态显式声明，这就是「状态机显式化」的落点。
+class AgentState(TypedDict):
+    messages: list          # 发给模型的完整消息历史（system + 历史 + 用户 + tool 结果）
+    retrieve_count: int     # 已检索几次，用来判「到上限就强制收尾」
+    all_hits: list          # 累积所有检索到的片段，最终返回
+    total_usage: dict       # 累积 token
+    result: dict            # 最终解析出的 answer/ask_more/escalate
+    ticket_text: str        # 原始工单（收尾后写会话用）
+    thread_id: str | None   # 会话 id
 
-    流程：先把工单交给模型，模型决定「调 retrieve 检索」还是「直接给最终判断」。
-    - 调 retrieve：执行检索，把结果作为 tool 消息喂回去，让模型继续决定。
-    - 给最终判断：解析 JSON，返回 answer/ask_more/escalate。
 
-    最多检索 MAX_RETRIEVE 次，到上限强制让模型收尾，防止死循环和 token 失控。
-    thread_id 语义和 v4 一致：None 是单轮，不读写会话表。
-    """
+def init_state(ticket_text, thread_id):
+    """构造初始状态。对应 v5 里 triage() 开头拼 messages 那段。"""
     history = SESSIONS.get(thread_id, []) if thread_id else []
-
-    # 首条 user 消息：把工单（带上多轮历史）交给模型，模型自己决定要不要检索
     query_text = build_query(ticket_text, history)
     messages = [{"role": "system", "content": build_system(bool(history))}]
     for turn in history:
         messages.append({"role": "user", "content": turn["user"]})
         messages.append({"role": "assistant", "content": turn["assistant"]})
     messages.append({"role": "user", "content": f"用户反馈：\n{query_text}"})
+    return AgentState(
+        messages=messages,
+        retrieve_count=0,
+        all_hits=[],
+        total_usage={"prompt_tokens": 0, "completion_tokens": 0},
+        result={},
+        ticket_text=ticket_text,
+        thread_id=thread_id,
+    )
 
-    all_hits = []          # 累积所有检索到的片段，最后返回
-    total_usage = {"prompt_tokens": 0, "completion_tokens": 0}
-    result = None
 
-    for _ in range(MAX_RETRIEVE + 1):  # 最多 MAX_RETRIEVE 次检索 + 1 次最终判断
-        response = CLIENT.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            tools=TOOLS,
-            temperature=0,
-            extra_body={"thinking": {"type": "disabled"}},
-        )
-        total_usage["prompt_tokens"] += response.usage.prompt_tokens
-        total_usage["completion_tokens"] += response.usage.completion_tokens
+# ── 节点 1：让模型决定下一步 ──────────────────────────────────────
+# 对应 v5 循环里「调一次模型」那步。节点只负责调模型、更新状态，
+# 「接下来去哪」由下面的 route 路由函数判断，节点本身不管。
+def call_model(state: AgentState) -> AgentState:
+    response = CLIENT.chat.completions.create(
+        model=MODEL,
+        messages=state["messages"],
+        tools=TOOLS,
+        temperature=0,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    state["total_usage"]["prompt_tokens"] += response.usage.prompt_tokens
+    state["total_usage"]["completion_tokens"] += response.usage.completion_tokens
 
-        msg = response.choices[0].message
+    msg = response.choices[0].message
+    state["messages"].append(msg.model_dump())
+    if not msg.tool_calls:
+        state["result"] = parse_result(msg.content or "")
+    return state
 
-        # 模型要求调工具：执行检索，把结果作为 tool 消息追加回去
-        if msg.tool_calls:
-            messages.append({"role": "assistant", "tool_calls": msg.tool_calls,
-                             "content": msg.content})
-            for call in msg.tool_calls:
-                args = json.loads(call.function.arguments)
-                hits = kb.search(args.get("query", ""), top_k=top_k)
-                all_hits.extend(hits)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": format_hits(hits),
-                })
-            continue
 
-        # 模型给了最终判断：解析 JSON
-        content = msg.content or ""
-        result = parse_result(content)
-        break
+# ── 节点 2：执行检索 ──────────────────────────────────────────────
+# 对应 v5 里「模型要求调工具时执行检索」那段。要不要检索的判断挪到了
+# 边（route）上，节点只干「检索」这一件事，职责单一。
+def do_retrieve(state: AgentState, top_k: int) -> AgentState:
+    msg = state["messages"][-1]
+    for call in msg["tool_calls"]:
+        args = json.loads(call["function"]["arguments"])
+        hits = kb.search(args.get("query", ""), top_k=top_k)
+        state["all_hits"].extend(hits)
+        state["messages"].append({
+            "role": "tool",
+            "tool_call_id": call["id"],
+            "content": format_hits(hits),
+        })
+    state["retrieve_count"] += 1
+    return state
 
-    # 循环结束仍没结果（例如一直调工具到上限），兜底转人工
-    if result is None:
-        result = {"category": "其他", "decision": "escalate",
-                  "reply": "", "reason": "达到检索次数上限仍未给出判断，转人工。"}
 
-    result["hits"] = all_hits
-    result["usage"] = total_usage
+# ── 路由：模型这轮到底想干什么 ────────────────────────────────────
+# 这是 v5 里 `if msg.tool_calls ... else ...` 那个分支，从代码搬到了「边」上。
+# 每个节点跑完，问一次「下一步去哪」，返回节点名。
+def route(state: AgentState):
+    msg = state["messages"][-1]
+    if msg.get("tool_calls") and state["retrieve_count"] < MAX_RETRIEVE:
+        return "retrieve"          # 模型要检索，且没到上限 → 走检索节点
+    return "finalize"              # 否则收尾（给结论了，或到上限了）
 
-    # 控制会话生命周期（和 v4 一致）
-    if thread_id:
+
+# ── 节点 3：收尾 ──────────────────────────────────────────────────
+# 对应 v5 循环结束后「兜底转人工 + 挂 hits/usage + 会话生命周期」那段。
+def finalize(state: AgentState) -> AgentState:
+    result = state.get("result") or {
+        "category": "其他", "decision": "escalate",
+        "reply": "", "reason": "达到检索次数上限仍未给出判断，转人工。",
+    }
+    result["hits"] = state["all_hits"]
+    result["usage"] = state["total_usage"]
+
+    if state["thread_id"]:
         if result.get("decision") == "ask_more":
-            remember(thread_id, ticket_text, json.dumps(result, ensure_ascii=False))
+            remember(state["thread_id"], state["ticket_text"],
+                     json.dumps(result, ensure_ascii=False))
         else:
-            SESSIONS.pop(thread_id, None)
+            SESSIONS.pop(state["thread_id"], None)
 
-    return result
+    state["result"] = result
+    return state
+
+
+# ── 建图 ──────────────────────────────────────────────────────────
+# 把节点和边拼成一张图，结构一目了然：
+#   START → call_model ──route判断──→ retrieve ──→ call_model（环，最多绕 MAX_RETRIEVE 次）
+#                       └──────────→ finalize → END
+def build_graph(top_k=5):
+    graph = StateGraph(AgentState)
+    graph.add_node("call_model", call_model)
+    graph.add_node("retrieve", lambda s: do_retrieve(s, top_k))  # 闭包把 top_k 绑进检索节点
+    graph.add_node("finalize", finalize)
+
+    graph.add_edge(START, "call_model")
+    graph.add_conditional_edges("call_model", route, {"retrieve": "retrieve", "finalize": "finalize"})
+    graph.add_edge("retrieve", "call_model")   # 检索完回到模型，形成环
+    graph.add_edge("finalize", END)
+    return graph
+
+
+def triage(ticket_text, thread_id=None, top_k=5):
+    """处理一条工单（LangGraph 状态图版）。
+
+    签名和 v5 一致，评测脚本和 app.py 不用改。流程和 v5 完全相同：
+    模型决定「调 retrieve 检索」还是「直接给最终判断」，最多 MAX_RETRIEVE 次，
+    到上限强制收尾。thread_id 语义不变：None 是单轮，不读写会话表。
+    """
+    graph = build_graph(top_k).compile()
+    final = graph.invoke(init_state(ticket_text, thread_id))
+    return final["result"]
 
 
 if __name__ == "__main__":
